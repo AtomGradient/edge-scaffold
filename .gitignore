@@ -1,0 +1,13 @@
+*.xcuserdata*
+**/xcshareddata/swiftpm/
+.DS_Store
+.claude/
+.ai-mailbox/
+build/
+.build/
+docs/eval/
+Resources/RPP/*.safetensors
+Resources/RPP/*_report.json
+Resources/RPP/rpp_a_library_manifest.json
+Resources/RPP/B_*.json
+!Resources/RPP/A_LIBRARY_ASSETS.md
