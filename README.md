@@ -26,7 +26,7 @@ edge-scaffold / exported apps / dogfood-app
 Use this repo to inspect the standard app-side wiring for:
 
 - Streaming LLM, VLM, TTS, and STT chat surfaces.
-- Four-tier model loading: local cache, app bundle, ODR, remote fallback.
+- Five-tier model loading: Documents, local cache, app bundle, ODR, remote fallback.
 - EdgeKit inference, model, mesh, data, and session modules.
 - EdgeHalo binary integration and Neural Imprint restore hooks.
 - EdgeData classification, facts, tool registry, and tool schema snapshots.
@@ -123,10 +123,11 @@ directly, keep the field names stable so generated apps remain patchable.
 
 The app tries these sources in order:
 
-1. Local app cache.
-2. Model folder copied into the app bundle by the build phase.
-3. On-Demand Resources using the `model` asset tag.
-4. Remote fallback when the app is configured to allow it.
+1. `Documents/<modelID>` — a model pushed into the app's Documents container (e.g. via `devicectl` for fast dev iteration); shown as `Source: Documents`.
+2. Local app cache.
+3. Model folder copied into the app bundle by the build phase.
+4. On-Demand Resources using the `model` asset tag.
+5. Remote fallback when the app is configured to allow it.
 
 For local development, `edgescaffolding_model_config` controls the build phase:
 
@@ -154,7 +155,7 @@ binary package.
 template. Edge Studio reads it during export and writes the exact version into
 the generated `project.yml`.
 
-Current minimum EdgeKit version: `1.0.0-rc98`.
+Current minimum EdgeKit version: `1.0.0-rc100`.
 
 ## Neural Imprint And RPP
 

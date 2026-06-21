@@ -136,10 +136,15 @@ struct AIEngineSection: View {
     /// so we must not show a scary "not found in Documents" message for it.
     private var shouldSurfaceModelPathDiagnostic: Bool {
         guard modelPathDiagnostic.isActionable else { return false }
-        if aiManager.isModelLoaded {
-            return modelPathDiagnostic.status == .modelFilesAtDocumentsRoot
+        // Stray model files at the Documents root are a real misconfiguration —
+        // always surface, regardless of load state.
+        if modelPathDiagnostic.status == .modelFilesAtDocumentsRoot {
+            return true
         }
-        return true
+        // Otherwise (e.g. an empty Documents directory) this is only actionable
+        // on a genuine load failure — not the transient idle/loading window
+        // before bundle/ODR succeeds, and not a successful bundle/ODR load.
+        return aiManager.loadError != nil && !aiManager.isModelLoaded
     }
 
     private var statusColor: Color {
