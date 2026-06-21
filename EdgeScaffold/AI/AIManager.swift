@@ -10,6 +10,7 @@ import EdgeSession
 import Tokenizers
 
 enum ModelLoadSource: String {
+    case documents = "Documents"
     case cache = "Local Cache"
     case bundle = "Bundle"
     case odr = "ODR"
@@ -149,7 +150,7 @@ final class AIManager: ObservableObject {
             .appendingPathComponent(docsModelID, isDirectory: true)
         if let docsURL, FileManager.default.fileExists(atPath: docsURL.path) {
             if await tryLoadLocal(directory: docsURL) {
-                loadSource = .cache
+                loadSource = .documents
                 stateManager.isModelDownloaded = true
                 stateManager.setLastLoadedModel(docsModelID)
                 await restorePersonalizationStateAfterModelLoad()

@@ -61,7 +61,7 @@ struct AIEngineSection: View {
                     }
                 }
 
-                if modelPathDiagnostic.isActionable {
+                if shouldSurfaceModelPathDiagnostic {
                     VStack(alignment: .leading, spacing: 6) {
                         Label("Model install path", systemImage: "folder.badge.questionmark")
                             .font(.caption.bold())
@@ -127,6 +127,19 @@ struct AIEngineSection: View {
         .onChange(of: aiManager.engineState) {
             modelPathDiagnostic = AIManager.validateDocumentsModelInstall()
         }
+    }
+
+    /// Only surface the Documents install-path warning when it is genuinely
+    /// actionable: the model failed to load from every layer, or the user left
+    /// stray model files at the Documents root. A bundled/ODR model with an
+    /// empty Documents directory is the expected delivery shape, not an error,
+    /// so we must not show a scary "not found in Documents" message for it.
+    private var shouldSurfaceModelPathDiagnostic: Bool {
+        guard modelPathDiagnostic.isActionable else { return false }
+        if aiManager.isModelLoaded {
+            return modelPathDiagnostic.status == .modelFilesAtDocumentsRoot
+        }
+        return true
     }
 
     private var statusColor: Color {
