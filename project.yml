@@ -13,7 +13,7 @@ options:
 packages:
   EdgeKit:
     url: https://github.com/AtomGradient/edge-kit.git
-    exactVersion: 1.0.0-rc98
+    exactVersion: 1.0.0-rc100
   EdgeHalo:
     url: https://github.com/AtomGradient/edge-halo-binary
     exactVersion: 1.0.0-rc24
@@ -23,6 +23,16 @@ packages:
   swift-markdown-ui:
     url: https://github.com/gonzalezreal/swift-markdown-ui
     from: 2.4.1
+
+schemes:
+  EdgeScaffold:
+    build:
+      targets:
+        EdgeScaffold: all
+    run:
+      config: Release
+    archive:
+      config: Release
 
 targets:
   EdgeScaffold:
