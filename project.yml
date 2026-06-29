@@ -13,7 +13,7 @@ options:
 packages:
   EdgeKit:
     url: https://github.com/AtomGradient/edge-kit.git
-    exactVersion: 1.0.0-rc100
+    exactVersion: 1.0.0-rc102
   EdgeHalo:
     url: https://github.com/AtomGradient/edge-halo-binary
     exactVersion: 1.0.0-rc24

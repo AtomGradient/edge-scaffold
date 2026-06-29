@@ -877,7 +877,7 @@
 			repositoryURL = "https://github.com/AtomGradient/edge-kit.git";
 			requirement = {
 				kind = exactVersion;
-				version = "1.0.0-rc100";
+				version = "1.0.0-rc102";
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
