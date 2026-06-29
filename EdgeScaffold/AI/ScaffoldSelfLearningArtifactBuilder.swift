@@ -17,9 +17,9 @@ final class ScaffoldSelfLearningArtifactBuilder: SelfLearningArtifactBuilder {
     func renderNeuralImprintPrefix(
         request: SelfLearningPrefixRequest
     ) async throws -> SelfLearningRenderedPrefix {
-        let engine = try readyLLMEngine()
+        let runtime = try aiManager.readyNeuralImprintRuntime()
         let tools = try Self.readOnlyToolSpecs()
-        let render = try await engine.renderNeuralImprintPrefix(
+        let render = try await runtime.renderNeuralImprintPrefix(
             profileBody: request.profileBody,
             tools: tools,
             parameters: AIManager.defaultParameters(enableThinking: request.enableThinking)
@@ -35,9 +35,9 @@ final class ScaffoldSelfLearningArtifactBuilder: SelfLearningArtifactBuilder {
     func captureNeuralImprintArtifact(
         request: SelfLearningArtifactCaptureRequest
     ) async throws -> HaloCapsule {
-        let engine = try readyLLMEngine()
+        let runtime = try aiManager.readyNeuralImprintRuntime()
         let toolSchemaSnapshot = try Self.readOnlyToolSchemaSnapshot()
-        let status = try await engine.captureNeuralImprintArtifact(
+        let status = try await runtime.captureNeuralImprintArtifact(
             request: NeuralImprintArtifactCaptureRequest(
                 outputDirectory: request.outputDirectory,
                 renderedPrefix: request.renderedPrefix.renderedPrefix,
@@ -68,16 +68,6 @@ final class ScaffoldSelfLearningArtifactBuilder: SelfLearningArtifactBuilder {
             ),
             renderedPrefix: request.renderedPrefix
         )
-    }
-
-    private func readyLLMEngine() throws -> LLMEngine {
-        guard aiManager.modelCategory == .llm, let engine = aiManager.llmEngine else {
-            throw EdgeRuntimeError.unsupportedFeature("Neural Imprint capture requires an LLM engine")
-        }
-        guard engine.state == .ready else {
-            throw EdgeRuntimeError.loadFailed("No LLM model loaded")
-        }
-        return engine
     }
 
     private static func readOnlyToolSpecs() throws -> [ToolSpec] {

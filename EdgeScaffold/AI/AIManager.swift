@@ -50,6 +50,84 @@ struct ModelInstallPathDiagnostic: Equatable {
     }
 }
 
+enum ScaffoldNeuralImprintRuntime {
+    case llm(LLMEngine)
+    case vlm(VLMEngine)
+
+    var state: EngineState {
+        switch self {
+        case .llm(let engine): return engine.state
+        case .vlm(let engine): return engine.state
+        }
+    }
+
+    var activeNeuralImprintCache: NeuralImprintRuntimeCacheStatus? {
+        switch self {
+        case .llm(let engine): return engine.activeNeuralImprintCache
+        case .vlm(let engine): return engine.activeNeuralImprintCache
+        }
+    }
+
+    var missingModelMessage: String {
+        switch self {
+        case .llm: return "No LLM model loaded"
+        case .vlm: return "No VLM model loaded"
+        }
+    }
+
+    func renderNeuralImprintPrefix(
+        profileBody: String,
+        tools: [ToolSpec],
+        parameters: EdgeGenerateParameters
+    ) async throws -> NeuralImprintPrefixRender {
+        switch self {
+        case .llm(let engine):
+            return try await engine.renderNeuralImprintPrefix(
+                profileBody: profileBody,
+                tools: tools,
+                parameters: parameters
+            )
+        case .vlm(let engine):
+            return try await engine.renderNeuralImprintPrefix(
+                profileBody: profileBody,
+                tools: tools,
+                parameters: parameters
+            )
+        }
+    }
+
+    func captureNeuralImprintArtifact(
+        request: NeuralImprintArtifactCaptureRequest
+    ) async throws -> NeuralImprintRuntimeCacheStatus {
+        switch self {
+        case .llm(let engine):
+            return try await engine.captureNeuralImprintArtifact(request: request)
+        case .vlm(let engine):
+            return try await engine.captureNeuralImprintArtifact(request: request)
+        }
+    }
+
+    func restoreNeuralImprintCache(
+        from directory: URL
+    ) throws -> NeuralImprintRuntimeCacheStatus {
+        switch self {
+        case .llm(let engine):
+            return try engine.restoreNeuralImprintCache(from: directory)
+        case .vlm(let engine):
+            return try engine.restoreNeuralImprintCache(from: directory)
+        }
+    }
+
+    func unloadNeuralImprintCache() {
+        switch self {
+        case .llm(let engine):
+            engine.unloadNeuralImprintCache()
+        case .vlm(let engine):
+            engine.unloadNeuralImprintCache()
+        }
+    }
+}
+
 @MainActor
 final class AIManager: ObservableObject {
 
@@ -76,7 +154,7 @@ final class AIManager: ObservableObject {
     @Published var loadingProgress: Double = 0
     @Published var loadError: String?
     @Published var loadSource: ModelLoadSource = .none
-    @Published var neuralImprintCacheStatus: LLMEngine.NeuralImprintCacheStatus?
+    @Published var neuralImprintCacheStatus: NeuralImprintRuntimeCacheStatus?
     @Published var neuralImprintCacheError: String?
     @Published private(set) var currentGenerationTokenCount: Int?
     var generationTokenCountObserver: ((Int) -> Void)?
@@ -86,6 +164,41 @@ final class AIManager: ObservableObject {
     var modelCategory: ModelCategory { ScaffoldConfig.modelCategory }
 
     var engine: LLMEngine { llmEngine ?? LLMEngine() }
+
+    func readyNeuralImprintRuntime() throws -> ScaffoldNeuralImprintRuntime {
+        let runtime: ScaffoldNeuralImprintRuntime
+        switch modelCategory {
+        case .llm:
+            guard let engine = llmEngine else {
+                throw EdgeRuntimeError.loadFailed("No LLM engine")
+            }
+            runtime = .llm(engine)
+        case .vlm:
+            guard let engine = vlmEngine else {
+                throw EdgeRuntimeError.loadFailed("No VLM engine")
+            }
+            runtime = .vlm(engine)
+        case .tts, .stt:
+            throw EdgeRuntimeError.unsupportedFeature("Neural Imprint requires an LLM/VLM engine")
+        }
+        guard runtime.state == .ready else {
+            throw EdgeRuntimeError.loadFailed(runtime.missingModelMessage)
+        }
+        return runtime
+    }
+
+    private func neuralImprintRuntimeIfReady() -> ScaffoldNeuralImprintRuntime? {
+        switch modelCategory {
+        case .llm:
+            guard let engine = llmEngine, engine.state == .ready else { return nil }
+            return .llm(engine)
+        case .vlm:
+            guard let engine = vlmEngine, engine.state == .ready else { return nil }
+            return .vlm(engine)
+        case .tts, .stt:
+            return nil
+        }
+    }
 
     private init() {
         switch ScaffoldConfig.modelCategory {
@@ -576,7 +689,7 @@ final class AIManager: ObservableObject {
 
     @discardableResult
     func restoreNeuralImprintCacheIfAvailable() async -> Bool {
-        guard modelCategory == .llm, let engine = llmEngine else { return false }
+        guard let runtime = neuralImprintRuntimeIfReady() else { return false }
         guard let directory = Self.firstAvailableNeuralImprintDirectory() else {
             neuralImprintCacheStatus = nil
             neuralImprintCacheError = nil
@@ -585,7 +698,7 @@ final class AIManager: ObservableObject {
         }
 
         do {
-            let status = try engine.restoreNeuralImprintCache(from: directory)
+            let status = try runtime.restoreNeuralImprintCache(from: directory)
             neuralImprintCacheStatus = status
             neuralImprintCacheError = nil
             NSLog(
@@ -608,17 +721,12 @@ final class AIManager: ObservableObject {
     func buildAndActivateSelfLearningNeuralImprint(
         kind: SelfLearningArtifactKind,
         profileBody: String
-    ) async throws -> LLMEngine.NeuralImprintCacheStatus {
-        guard modelCategory == .llm, let engine = llmEngine else {
-            throw EdgeRuntimeError.unsupportedFeature("Neural Imprint capture requires an LLM engine")
-        }
-        guard engine.state == .ready else {
-            throw EdgeRuntimeError.loadFailed("No LLM model loaded")
-        }
+    ) async throws -> NeuralImprintRuntimeCacheStatus {
+        let runtime = try readyNeuralImprintRuntime()
 
         let previousDirectory = neuralImprintCacheStatus?.directory ?? Self.firstAvailableNeuralImprintDirectory()
-        if engine.activeNeuralImprintCache != nil {
-            engine.unloadNeuralImprintCache()
+        if runtime.activeNeuralImprintCache != nil {
+            runtime.unloadNeuralImprintCache()
             neuralImprintCacheStatus = nil
         }
 
@@ -677,7 +785,7 @@ final class AIManager: ObservableObject {
             )
             if let previousDirectory,
                Self.neuralImprintDirectoryContainsArtifact(previousDirectory),
-               let status = try? engine.restoreNeuralImprintCache(from: previousDirectory) {
+               let status = try? runtime.restoreNeuralImprintCache(from: previousDirectory) {
                 neuralImprintCacheStatus = status
                 neuralImprintCacheError = nil
                 NSLog(
@@ -692,7 +800,7 @@ final class AIManager: ObservableObject {
     @discardableResult
     func buildAndActivateCombinedNeuralImprint(
         profileBody: String
-    ) async throws -> LLMEngine.NeuralImprintCacheStatus {
+    ) async throws -> NeuralImprintRuntimeCacheStatus {
         try await buildAndActivateSelfLearningNeuralImprint(
             kind: .combinedKV,
             profileBody: profileBody
@@ -700,7 +808,7 @@ final class AIManager: ObservableObject {
     }
 
     @discardableResult
-    func buildAndActivateToolsOnlyNeuralImprint() async throws -> LLMEngine.NeuralImprintCacheStatus {
+    func buildAndActivateToolsOnlyNeuralImprint() async throws -> NeuralImprintRuntimeCacheStatus {
         let status = try await buildAndActivateSelfLearningNeuralImprint(
             kind: .toolsOnlyKV,
             profileBody: Self.toolsOnlyNeuralImprintProfileBody
@@ -715,11 +823,9 @@ final class AIManager: ObservableObject {
     @discardableResult
     func restoreNeuralImprintCacheForHalo(
         from directory: URL
-    ) throws -> LLMEngine.NeuralImprintCacheStatus {
-        guard modelCategory == .llm, let engine = llmEngine else {
-            throw EdgeRuntimeError.unsupportedFeature("Neural Imprint restore requires an LLM engine")
-        }
-        let status = try engine.restoreNeuralImprintCache(from: directory)
+    ) throws -> NeuralImprintRuntimeCacheStatus {
+        let runtime = try readyNeuralImprintRuntime()
+        let status = try runtime.restoreNeuralImprintCache(from: directory)
         neuralImprintCacheStatus = status
         neuralImprintCacheError = nil
         writeNeuralImprintRestoreReceipt(
@@ -733,13 +839,8 @@ final class AIManager: ObservableObject {
     @discardableResult
     func installAndRestoreNeuralImprintCacheFromHaloPackage(
         at packageDirectory: URL
-    ) async throws -> LLMEngine.NeuralImprintCacheStatus {
-        guard modelCategory == .llm, let engine = llmEngine else {
-            throw EdgeRuntimeError.unsupportedFeature("Neural Imprint restore requires an LLM engine")
-        }
-        guard engine.state == .ready else {
-            throw EdgeRuntimeError.loadFailed("No LLM model loaded")
-        }
+    ) async throws -> NeuralImprintRuntimeCacheStatus {
+        let runtime = try readyNeuralImprintRuntime()
 
         let fileManager = FileManager.default
         let finalDirectory = Self.documentsDirectory.appendingPathComponent("neural_imprint", isDirectory: true)
@@ -760,7 +861,7 @@ final class AIManager: ObservableObject {
 
         do {
             try fileManager.moveItem(at: packageDirectory, to: finalDirectory)
-            let status = try engine.restoreNeuralImprintCache(from: finalDirectory)
+            let status = try runtime.restoreNeuralImprintCache(from: finalDirectory)
             neuralImprintCacheStatus = status
             neuralImprintCacheError = nil
             if movedExistingToBackup {
@@ -780,7 +881,7 @@ final class AIManager: ObservableObject {
                fileManager.fileExists(atPath: backupDirectory.path),
                !fileManager.fileExists(atPath: finalDirectory.path) {
                 try? fileManager.moveItem(at: backupDirectory, to: finalDirectory)
-                if let restored = try? engine.restoreNeuralImprintCache(from: finalDirectory) {
+                if let restored = try? runtime.restoreNeuralImprintCache(from: finalDirectory) {
                     neuralImprintCacheStatus = restored
                     neuralImprintCacheError = nil
                 }
@@ -948,7 +1049,7 @@ final class AIManager: ObservableObject {
     }
 
     private func writeNeuralImprintRestoreReceipt(
-        status: LLMEngine.NeuralImprintCacheStatus?,
+        status: NeuralImprintRuntimeCacheStatus?,
         outcome: String,
         error: String?
     ) {
