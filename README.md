@@ -155,7 +155,7 @@ binary package.
 template. Edge Studio reads it during export and writes the exact version into
 the generated `project.yml`.
 
-Current minimum EdgeKit version: `1.0.0-rc102`.
+Current minimum EdgeKit version: `1.0.0-rc103`.
 
 ## Neural Imprint And RPP
 
