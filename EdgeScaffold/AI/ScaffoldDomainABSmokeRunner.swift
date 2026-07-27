@@ -2,7 +2,6 @@
 // 版权所有 © 2026 质子梯度（北京）科技有限公司
 
 import Darwin
-import CryptoKit
 import Foundation
 import EdgeInference
 import EdgeSession
@@ -26,36 +25,12 @@ enum ScaffoldDomainABSmokeRunner {
     )
     private static let includeBaselineEnvironmentKey =
         "EDGE_SCAFFOLD_AB_INCLUDE_BASELINE"
-    private static let controlledV2EnvironmentKey =
-        "EDGE_SCAFFOLD_AB_CONTROLLED_V2"
-    private static let controlledV2RepeatsEnvironmentKey =
-        "EDGE_SCAFFOLD_AB_CONTROLLED_V2_REPEATS"
-    private static let controlledV2MaxTokens = 128
-    private static let controlledV2MaxRounds = 3
 
     private static var includeBaseline: Bool {
         let raw = ProcessInfo.processInfo.environment[includeBaselineEnvironmentKey]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         return raw == "1" || raw == "true" || raw == "yes"
-    }
-
-    private static var controlledV2: Bool {
-        let raw = ProcessInfo.processInfo.environment[controlledV2EnvironmentKey]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return raw == "1" || raw == "true" || raw == "yes"
-    }
-
-    private static var controlledV2Repeats: Int {
-        let raw = ProcessInfo.processInfo.environment[controlledV2RepeatsEnvironmentKey] ?? "3"
-        return min(10, max(1, Int(raw) ?? 3))
-    }
-
-    private static var reportSchemaVersion: String {
-        controlledV2
-            ? "edge_scaffold.domain_neural_imprint_controlled.v2"
-            : "edge_scaffold.domain_neural_imprint_ab_smoke.v1"
     }
 
     static var shouldRun: Bool {
@@ -114,7 +89,7 @@ enum ScaffoldDomainABSmokeRunner {
         aiManager.isNeuralImprintRestoreEnabled = originalRestoreEnabled
         let finishedAt = Date()
         return DomainABSmokeReport(
-            schemaVersion: reportSchemaVersion,
+            schemaVersion: "edge_scaffold.domain_neural_imprint_ab_smoke.v1",
             startedAt: isoString(from: startedAt),
             finishedAt: isoString(from: finishedAt),
             durationMs: Int(finishedAt.timeIntervalSince(startedAt) * 1_000),
@@ -173,7 +148,6 @@ enum ScaffoldDomainABSmokeRunner {
                 toolCallsBase: [],
                 toolCallsImprint: [],
                 toolTrace: [],
-                controlledArms: [],
                 deltaSummary: "",
                 elapsedBaseMs: 0,
                 elapsedImprintMs: 0,
@@ -315,38 +289,6 @@ enum ScaffoldDomainABSmokeRunner {
             checkpoint()
         }
 
-        if controlledV2 {
-            if errors.contains(where: { $0.hasPrefix("rpp/neural imprint failed") }) {
-                return makeDomainResult(
-                    domain: domain,
-                    expectedRecords: expectedRecords,
-                    seedStats: seedStats,
-                    rpp: rpp,
-                    prompts: promptResults,
-                    domainStartedAt: domainStartedAt,
-                    errors: errors,
-                    final: true
-                )
-            }
-            let controlled = await runControlledV2(
-                domain: domain,
-                prompts: promptResults,
-                aiManager: aiManager
-            )
-            promptResults = controlled.prompts
-            errors.append(contentsOf: controlled.errors)
-            return makeDomainResult(
-                domain: domain,
-                expectedRecords: expectedRecords,
-                seedStats: seedStats,
-                rpp: rpp,
-                prompts: promptResults,
-                domainStartedAt: domainStartedAt,
-                errors: errors,
-                final: true
-            )
-        }
-
         for index in promptResults.indices {
             var result = promptResults[index]
             if errors.contains(where: { $0.hasPrefix("rpp/neural imprint failed") }) {
@@ -429,510 +371,6 @@ enum ScaffoldDomainABSmokeRunner {
         )
     }
 
-    private static func runControlledV2(
-        domain: ScaffoldSampleDomainDescriptor,
-        prompts: [DomainABPromptResult],
-        aiManager: AIManager
-    ) async -> ControlledRunResult {
-        var updatedPrompts = prompts.filter { $0.kind != "general" }
-        var errors: [String] = []
-        NSLog(
-            "[ScaffoldDomainABSmokeRunner] controlled v2 start domain=%@ prompts=%d repeats=%d",
-            domain.id.rawValue,
-            updatedPrompts.count,
-            controlledV2Repeats
-        )
-        guard let artifactDirectory = aiManager.neuralImprintCacheStatus?.directory else {
-            return ControlledRunResult(
-                prompts: updatedPrompts,
-                errors: ["controlled_v2: active artifact directory unavailable after RPP"]
-            )
-        }
-        let profileURL = artifactDirectory.appendingPathComponent("profile_body.txt")
-        let metadataURL = artifactDirectory.appendingPathComponent("neural_imprint_metadata.json")
-        guard let profileBody = try? String(contentsOf: profileURL, encoding: .utf8),
-              !profileBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return ControlledRunResult(
-                prompts: updatedPrompts,
-                errors: ["controlled_v2: neural_imprint/profile_body.txt missing or empty"]
-            )
-        }
-
-        let sidecar = readJSONObject(at: metadataURL)
-        let sidecarSource = sidecar?["source"] as? [String: Any]
-        let sidecarPrefix = sidecar?["prefix"] as? [String: Any]
-        let artifactProfileBodySHA256 = sidecarSource?["profile_body_sha256"] as? String
-        let artifactPrefixTokenIDsSHA256 = sidecarPrefix?["token_ids_sha256"] as? String
-        let toolSchemaSHA256 = sidecarSource?["tool_schema_sha256"] as? String
-        let profileBodySHA256 = sha256Text(profileBody)
-        guard let artifactProfileBodySHA256 else {
-            return ControlledRunResult(
-                prompts: updatedPrompts,
-                errors: ["controlled_v2: sidecar missing source.profile_body_sha256"]
-            )
-        }
-        guard artifactProfileBodySHA256 == profileBodySHA256 else {
-            return ControlledRunResult(
-                prompts: updatedPrompts,
-                errors: [
-                    "controlled_v2: profile body hash mismatch artifact=\(artifactProfileBodySHA256) actual=\(profileBodySHA256)"
-                ]
-            )
-        }
-        guard let artifactPrefixTokenIDsSHA256 else {
-            return ControlledRunResult(
-                prompts: updatedPrompts,
-                errors: ["controlled_v2: sidecar missing prefix.token_ids_sha256"]
-            )
-        }
-
-        let toolNames = ScaffoldSampleDomainRegistry.selectedToolNames()
-        let toolSpecs: [EdgeSessionToolSpec]
-        do {
-            toolSpecs = try ToolRegistry.shared.toolSpecs(forNames: toolNames)
-        } catch {
-            return ControlledRunResult(
-                prompts: updatedPrompts,
-                errors: errors + ["controlled_v2: tool specs unavailable: \(error.localizedDescription)"]
-            )
-        }
-
-        let runtime: ScaffoldNeuralImprintRuntime
-        do {
-            runtime = try aiManager.readyNeuralImprintRuntime()
-        } catch {
-            return ControlledRunResult(
-                prompts: updatedPrompts,
-                errors: errors + ["controlled_v2: runtime unavailable: \(error.localizedDescription)"]
-            )
-        }
-
-        var parameters = controlledV2Parameters()
-        let visibleToolsPrefix: NeuralImprintPrefixRender
-        do {
-            visibleToolsPrefix = try await runtime.renderNeuralImprintPrefix(
-                profileBody: profileBody,
-                tools: toolSpecs,
-                parameters: parameters
-            )
-        } catch {
-            return ControlledRunResult(
-                prompts: updatedPrompts,
-                errors: errors + ["controlled_v2: exact prefix render failed: \(error.localizedDescription)"]
-            )
-        }
-        let visibleToolsPrefixSHA256 = tokenIDsSHA256(visibleToolsPrefix.prefixTokenIDs)
-        let prefixTokenHashMatched =
-            artifactPrefixTokenIDsSHA256 == visibleToolsPrefixSHA256
-        guard prefixTokenHashMatched else {
-            return ControlledRunResult(
-                prompts: updatedPrompts,
-                errors: [
-                    "controlled_v2: live/restored prefix token hash mismatch artifact=\(artifactPrefixTokenIDsSHA256) live=\(visibleToolsPrefixSHA256)"
-                ]
-            )
-        }
-        let restoredPrefixTokenCount =
-            aiManager.neuralImprintCacheStatus?.prefixTokenCount ?? 0
-        guard visibleToolsPrefix.prefixTokenIDs.count == restoredPrefixTokenCount else {
-            return ControlledRunResult(
-                prompts: updatedPrompts,
-                errors: [
-                    "controlled_v2: live/restored prefix token count mismatch live=\(visibleToolsPrefix.prefixTokenIDs.count) restored=\(restoredPrefixTokenCount)"
-                ]
-            )
-        }
-
-        var primaryPromptIdentities: [ControlledPrimaryPromptIdentity] = []
-        do {
-            for prompt in updatedPrompts {
-                let livePromptTokenIDs = try await runtime.renderPromptTokenIDs(
-                    messages: controlledMessages(
-                        arm: .visibleProfileToolsLive,
-                        prompt: prompt.prompt,
-                        profileBody: profileBody
-                    ),
-                    tools: toolSpecs,
-                    parameters: parameters
-                )
-                let imprintSuffixTokenIDs = try await runtime.renderPromptTokenIDs(
-                    messages: controlledMessages(
-                        arm: .imprint,
-                        prompt: prompt.prompt,
-                        profileBody: profileBody
-                    ),
-                    tools: nil,
-                    parameters: parameters
-                )
-                let restoredPromptTokenIDs =
-                    visibleToolsPrefix.prefixTokenIDs + imprintSuffixTokenIDs
-                guard restoredPromptTokenIDs == livePromptTokenIDs else {
-                    return ControlledRunResult(
-                        prompts: updatedPrompts,
-                        errors: [
-                            "controlled_v2: rendered primary prompt token mismatch kind=\(prompt.kind) live=\(livePromptTokenIDs.count) restored=\(restoredPromptTokenIDs.count)"
-                        ]
-                    )
-                }
-                primaryPromptIdentities.append(
-                    ControlledPrimaryPromptIdentity(
-                        livePromptTokenIDs: livePromptTokenIDs,
-                        imprintSuffixTokenIDs: imprintSuffixTokenIDs,
-                        effectivePromptTokenIDsSHA256: tokenIDsSHA256(livePromptTokenIDs)
-                    )
-                )
-            }
-        } catch {
-            return ControlledRunResult(
-                prompts: updatedPrompts,
-                errors: [
-                    "controlled_v2: primary prompt render failed: \(error.localizedDescription)"
-                ]
-            )
-        }
-
-        let arms = ControlledArm.allCases
-        var executionSequence = 0
-        for repeatIndex in 0..<controlledV2Repeats {
-            for promptIndex in updatedPrompts.indices {
-                let offset =
-                    (repeatIndex * updatedPrompts.count + promptIndex) % arms.count
-                let orderedArms = Array(arms[offset...]) + Array(arms[..<offset])
-                for arm in orderedArms {
-                    executionSequence += 1
-                    if arm == .imprint {
-                        let restored = await aiManager.restoreNeuralImprintCacheIfAvailable()
-                        if !restored {
-                            errors.append(
-                                "controlled_v2: restore failed prompt=\(updatedPrompts[promptIndex].kind) repeat=\(repeatIndex)"
-                            )
-                        }
-                    } else {
-                        deactivateNeuralImprint(aiManager)
-                    }
-                    await Task.yield()
-
-                    let session = ChatSessionController(client: aiManager)
-                    parameters = controlledV2Parameters()
-                    let primaryIdentity = primaryPromptIdentities[promptIndex]
-                    let expectedPromptTokenIDs: [Int]
-                    do {
-                        switch arm {
-                        case .visibleProfileToolsLive:
-                            expectedPromptTokenIDs = primaryIdentity.livePromptTokenIDs
-                        case .imprint:
-                            expectedPromptTokenIDs = primaryIdentity.imprintSuffixTokenIDs
-                        default:
-                            expectedPromptTokenIDs = try await runtime.renderPromptTokenIDs(
-                                messages: controlledMessages(
-                                    arm: arm,
-                                    prompt: updatedPrompts[promptIndex].prompt,
-                                    profileBody: profileBody
-                                ),
-                                tools: arm.toolsInContext ? toolSpecs : nil,
-                                parameters: parameters
-                            )
-                        }
-                    } catch {
-                        return ControlledRunResult(
-                            prompts: updatedPrompts,
-                            errors: errors + [
-                                "controlled_v2: expected prompt render failed arm=\(arm.rawValue) kind=\(updatedPrompts[promptIndex].kind): \(error.localizedDescription)"
-                            ]
-                        )
-                    }
-                    let generation = await generateControlledAnswer(
-                        arm: arm,
-                        prompt: updatedPrompts[promptIndex].prompt,
-                        profileBody: profileBody,
-                        toolNames: toolNames,
-                        toolSpecs: toolSpecs,
-                        parameters: parameters,
-                        aiManager: aiManager,
-                        session: session
-                    )
-                    let metrics = generation.metrics
-                    let expectedPromptTokenIDsSHA256 =
-                        tokenIDsSHA256(expectedPromptTokenIDs)
-                    let actualPromptTokenIDsSHA256 =
-                        metrics?.promptTokenIDsSHA256
-                    let promptTokenHashMatched =
-                        actualPromptTokenIDsSHA256 == expectedPromptTokenIDsSHA256
-                        && metrics?.promptTokenCount == expectedPromptTokenIDs.count
-                    let effectivePromptTokens = arm == .imprint
-                        ? restoredPrefixTokenCount + expectedPromptTokenIDs.count
-                        : expectedPromptTokenIDs.count
-                    let effectivePromptTokenIDsSHA256 = arm == .imprint
-                        ? tokenIDsSHA256(
-                            visibleToolsPrefix.prefixTokenIDs + expectedPromptTokenIDs
-                        )
-                        : expectedPromptTokenIDsSHA256
-                    let primaryPromptTokenEquivalent: Bool? =
-                        arm == .visibleProfileToolsLive || arm == .imprint
-                        ? promptTokenHashMatched
-                            && prefixTokenHashMatched
-                            && effectivePromptTokenIDsSHA256
-                                == primaryIdentity.effectivePromptTokenIDsSHA256
-                        : nil
-                    var armErrors = generation.errors
-                    let promptMismatchError = promptTokenHashMatched ? nil
-                        : "controlled_v2: actual prompt token mismatch arm=\(arm.rawValue) kind=\(updatedPrompts[promptIndex].kind) repeat=\(repeatIndex) expected_count=\(expectedPromptTokenIDs.count) actual_count=\(metrics?.promptTokenCount ?? -1)"
-                    if let promptMismatchError {
-                        armErrors.append(promptMismatchError)
-                    }
-                    updatedPrompts[promptIndex].controlledArms.append(
-                        DomainABControlledArmResult(
-                            arm: arm.rawValue,
-                            repeatIndex: repeatIndex,
-                            executionSequence: executionSequence,
-                            profileInContext: arm.profileInContext,
-                            prefixDelivery: arm.prefixDelivery,
-                            toolsInContext: arm.toolsInContext,
-                            answer: generation.answer,
-                            neuralImprintActive: aiManager.hasNeuralImprintCache,
-                            restoredPrefixTokens: arm == .imprint
-                                ? restoredPrefixTokenCount
-                                : nil,
-                            effectivePromptTokens: effectivePromptTokens,
-                            profileBodySHA256: arm.profileInContext ? profileBodySHA256 : nil,
-                            actualPromptTokenIDsSHA256: actualPromptTokenIDsSHA256,
-                            expectedPromptTokenIDsSHA256: expectedPromptTokenIDsSHA256,
-                            effectivePromptTokenIDsSHA256: effectivePromptTokenIDsSHA256,
-                            artifactPrefixTokenIDsSHA256: artifactPrefixTokenIDsSHA256,
-                            artifactPrefixTokenHashMatched:
-                                arm == .visibleProfileToolsLive || arm == .imprint
-                                ? prefixTokenHashMatched
-                                : nil,
-                            promptTokenHashMatched: promptTokenHashMatched,
-                            primaryPromptTokenEquivalent: primaryPromptTokenEquivalent,
-                            systemPromptSHA256: sha256Text(
-                                arm.profileInContext
-                                    ? profileBody
-                                    : ScaffoldConfig.defaultSystemPrompt
-                            ),
-                            toolSchemaSHA256: arm.toolsInContext ? toolSchemaSHA256 : nil,
-                            toolCalls: generation.toolCalls,
-                            toolTrace: generation.toolTrace,
-                            elapsedMs: generation.elapsedMs,
-                            firstChunkMs: generation.firstChunkMs,
-                            ttftMs: metrics?.ttftMs,
-                            decodeTPS: metrics?.decodeTPS,
-                            promptTokenCount: metrics?.promptTokenCount,
-                            prefillTokenCount: metrics?.phaseTimings?.prefillTokenCount,
-                            prefillMs: metrics?.phaseTimings?.prefillMs,
-                            prefillMode: metrics?.phaseTimings?.prefillMode,
-                            generatedTokens: metrics?.generationTokenCount,
-                            promptCacheHit: metrics?.promptCacheHit,
-                            cachedTokensReused: metrics?.cachedTokensReused,
-                            thermalState: metrics?.thermalState,
-                            memoryBeforeMB: metrics?.memoryBeforeMB,
-                            memoryAfterMB: metrics?.memoryAfterMB,
-                            policyReasoning: metrics?.policyReasoning,
-                            maxTokens: parameters.maxTokens,
-                            maxRounds: arm.toolsInContext ? controlledV2MaxRounds : 0,
-                            turnTimeoutSeconds: generationWatchdog.turnTimeoutSeconds,
-                            livenessTimeoutSeconds: generationWatchdog.livenessTimeoutSeconds,
-                            enableThinking: parameters.enableThinking,
-                            preserveThinking: parameters.preserveThinking,
-                            useDSR: parameters.useDSR,
-                            kvBits: parameters.kvBits,
-                            maxKVSize: parameters.maxKVSize,
-                            prefillStepSize: parameters.prefillStepSize,
-                            frogJumpEnabled: parameters.frogJumpEnabled,
-                            timedOut: generation.timedOut,
-                            errors: armErrors
-                        )
-                    )
-                    if let promptMismatchError {
-                        return ControlledRunResult(
-                            prompts: updatedPrompts,
-                            errors: errors + [promptMismatchError]
-                        )
-                    }
-                }
-            }
-        }
-        return ControlledRunResult(prompts: updatedPrompts, errors: errors)
-    }
-
-    private static func controlledV2Parameters() -> EdgeGenerateParameters {
-        var parameters = AIManager.defaultParameters(enableThinking: false)
-        applySmokeGenerationPolicy(&parameters, maxTokens: controlledV2MaxTokens)
-        parameters.preserveThinking = false
-        parameters.useDSR = false
-        parameters.dsrMaxCritical = nil
-        parameters.dsrHeavyBudget = nil
-        parameters.dsrRecentBudget = nil
-        parameters.dsrEvictionInterval = 0
-        parameters.kvBits = nil
-        parameters.quantizedKVStart = 0
-        parameters.maxKVSize = nil
-        parameters.frogJumpEnabled = false
-        return parameters
-    }
-
-    private static func controlledMessages(
-        arm: ControlledArm,
-        prompt: String,
-        profileBody: String
-    ) -> [ChatMessage] {
-        if arm == .imprint {
-            return [.user(prompt)]
-        }
-        return [
-            .system(
-                arm.profileInContext
-                    ? profileBody
-                    : ScaffoldConfig.defaultSystemPrompt
-            ),
-            .user(prompt),
-        ]
-    }
-
-    private static func generateControlledAnswer(
-        arm: ControlledArm,
-        prompt: String,
-        profileBody: String,
-        toolNames: [String],
-        toolSpecs: [EdgeSessionToolSpec],
-        parameters: EdgeGenerateParameters,
-        aiManager: AIManager,
-        session: ChatSessionController
-    ) async -> ControlledGeneration {
-        let startedAt = Date()
-        var firstChunkMs: Int?
-        var toolCalls: [String] = []
-        var toolTrace: [DomainABToolTrace] = []
-        var pendingToolArguments: [String: [String]] = [:]
-        var firstRoundMetrics: InferenceMetrics?
-        let messages = controlledMessages(
-            arm: arm,
-            prompt: prompt,
-            profileBody: profileBody
-        )
-
-        do {
-            try await ensureModelLoaded(aiManager)
-            let answer: String
-            if arm.toolsInContext {
-                answer = try await ToolChatLoop.run(
-                    session: session,
-                    request: ToolChatLoop.Request(
-                        messages: messages,
-                        mode: .isolated("controlled_v2_\(arm.rawValue)"),
-                        tools: toolSpecs,
-                        allowedToolNames: toolNames,
-                        maxRounds: controlledV2MaxRounds,
-                        parameters: parameters,
-                        timeoutSeconds: nil,
-                        watchdogConfiguration: generationWatchdog,
-                        emptyFinalText: ""
-                    ),
-                    hooks: ToolChatLoop.Hooks(
-                        executePlannedTool: { plan in
-                            try await ToolRegistry.shared.execute(plan)
-                        },
-                        executeModelTool: { toolCall in
-                            try await ToolRegistry.shared.execute(toolCall)
-                        },
-                        summarizeToolResults: { _ in "" },
-                        streamSummary: { _, _ in },
-                        onModelToolCall: { toolCall in
-                            let name = toolCall.function.name
-                            toolCalls.append(name)
-                            pendingToolArguments[name, default: []].append(
-                                argumentsText(toolCall.function.arguments)
-                            )
-                        },
-                        onToolResult: { result in
-                            let arguments: String
-                            if var queued = pendingToolArguments[result.name], !queued.isEmpty {
-                                arguments = queued.removeFirst()
-                                pendingToolArguments[result.name] = queued
-                            } else {
-                                arguments = ""
-                            }
-                            toolTrace.append(DomainABToolTrace(
-                                name: result.name,
-                                source: result.source,
-                                argumentsPrefix: String(arguments.prefix(300)),
-                                matchedCount: toolResultInt(
-                                    result.result,
-                                    keys: ["matched_count", "matchedCount"]
-                                ),
-                                totalClassified: toolResultInt(
-                                    result.result,
-                                    keys: ["total_classified", "totalClassified"]
-                                ),
-                                totalAmount: toolResultDouble(
-                                    result.result,
-                                    keys: ["total_amount", "totalAmount"]
-                                ),
-                                totalDurationMinutes: toolResultDouble(
-                                    result.result,
-                                    keys: ["total_duration_minutes", "totalDurationMinutes"]
-                                ),
-                                resultPrefix: String(result.result.prefix(300))
-                            ))
-                        },
-                        onRoundMetrics: { roundIndex, metrics in
-                            if roundIndex == 0 {
-                                firstRoundMetrics = metrics
-                            }
-                        }
-                    )
-                ) { chunk in
-                    if firstChunkMs == nil, !chunk.isEmpty {
-                        firstChunkMs = Int(Date().timeIntervalSince(startedAt) * 1_000)
-                    }
-                }
-            } else {
-                answer = try await session.generatePrepared(
-                    messages: messages,
-                    mode: .isolated("controlled_v2_\(arm.rawValue)"),
-                    parameters: parameters,
-                    timeoutSeconds: nil,
-                    watchdogConfiguration: generationWatchdog
-                ) { chunk in
-                    if firstChunkMs == nil, !chunk.isEmpty {
-                        firstChunkMs = Int(Date().timeIntervalSince(startedAt) * 1_000)
-                    }
-                }
-            }
-            return ControlledGeneration(
-                answer: answer,
-                toolCalls: toolCalls,
-                toolTrace: toolTrace,
-                elapsedMs: Int(Date().timeIntervalSince(startedAt) * 1_000),
-                firstChunkMs: firstChunkMs,
-                metrics: firstRoundMetrics ?? session.lastMetrics,
-                timedOut: false,
-                errors: []
-            )
-        } catch {
-            return ControlledGeneration(
-                answer: "",
-                toolCalls: toolCalls,
-                toolTrace: toolTrace,
-                elapsedMs: Int(Date().timeIntervalSince(startedAt) * 1_000),
-                firstChunkMs: firstChunkMs,
-                metrics: firstRoundMetrics ?? session.lastMetrics,
-                timedOut: isTimeout(error),
-                errors: [error.localizedDescription]
-            )
-        }
-    }
-
-    private static func sha256Text(_ text: String) -> String {
-        SHA256.hash(data: Data(text.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
-    }
-
-    private static func tokenIDsSHA256(_ tokenIDs: [Int]) -> String {
-        sha256Text("[\(tokenIDs.map(String.init).joined(separator: ","))]")
-    }
-
     private static func makeDomainResult(
         domain: ScaffoldSampleDomainDescriptor,
         expectedRecords: Int,
@@ -943,31 +381,10 @@ enum ScaffoldDomainABSmokeRunner {
         errors: [String],
         final: Bool
     ) -> DomainABResult {
-        let promptGate = if controlledV2 {
-            prompts.allSatisfy { prompt in
-                prompt.controlledArms.count == 5 * controlledV2Repeats
-                    && prompt.controlledArms.allSatisfy {
-                        !$0.answer.isEmpty
-                            && $0.errors.isEmpty
-                            && !$0.timedOut
-                            && ($0.arm != ControlledArm.imprint.rawValue
-                                || $0.neuralImprintActive)
-                            && ($0.arm == ControlledArm.imprint.rawValue
-                                || !$0.neuralImprintActive)
-                            && $0.promptTokenHashMatched
-                            && ($0.arm != ControlledArm.visibleProfileToolsLive.rawValue
-                                || $0.primaryPromptTokenEquivalent == true)
-                            && ($0.arm != ControlledArm.imprint.rawValue
-                                || $0.primaryPromptTokenEquivalent == true)
-                    }
-            }
-        } else {
-            prompts.allSatisfy { !$0.imprintAnswer.isEmpty }
-        }
         let passed = final
             && errors.isEmpty
             && rpp?.imprintActive == true
-            && promptGate
+            && prompts.allSatisfy { !$0.imprintAnswer.isEmpty }
 
         return DomainABResult(
             domain: domain.id.rawValue,
@@ -1423,15 +840,6 @@ enum ScaffoldDomainABSmokeRunner {
         return dict
     }
 
-    private static func readJSONObject(at url: URL) -> [String: Any]? {
-        guard let data = try? Data(contentsOf: url),
-              let object = try? JSONSerialization.jsonObject(with: data),
-              let dict = object as? [String: Any] else {
-            return nil
-        }
-        return dict
-    }
-
     private static func lastRunJSON() -> [String: Any] {
         let url = documentsURL().appendingPathComponent("rpp_last_run.json")
         guard let data = try? Data(contentsOf: url),
@@ -1611,7 +1019,7 @@ enum ScaffoldDomainABSmokeRunner {
     ) {
         let now = Date()
         let report = DomainABSmokeReport(
-            schemaVersion: reportSchemaVersion,
+            schemaVersion: "edge_scaffold.domain_neural_imprint_ab_smoke.v1",
             startedAt: isoString(from: startedAt),
             finishedAt: isoString(from: now),
             durationMs: Int(now.timeIntervalSince(startedAt) * 1_000),
@@ -1765,58 +1173,6 @@ private struct DomainABPrompt: Encodable {
     var expectedAnswerContainsAny: [String] = []
 }
 
-private enum ControlledArm: String, CaseIterable {
-    case basePlain = "base_plain"
-    case visibleProfilePlain = "visible_profile_plain"
-    case toolsNoImprint = "tools_no_imprint"
-    case visibleProfileToolsLive = "visible_profile_tools_live"
-    case imprint
-
-    var profileInContext: Bool {
-        switch self {
-        case .basePlain, .toolsNoImprint:
-            return false
-        case .visibleProfilePlain, .visibleProfileToolsLive, .imprint:
-            return true
-        }
-    }
-
-    var toolsInContext: Bool {
-        switch self {
-        case .basePlain, .visibleProfilePlain:
-            return false
-        case .toolsNoImprint, .visibleProfileToolsLive, .imprint:
-            return true
-        }
-    }
-
-    var prefixDelivery: String {
-        self == .imprint ? "restored_kv" : "live_prefill"
-    }
-}
-
-private struct ControlledRunResult {
-    let prompts: [DomainABPromptResult]
-    let errors: [String]
-}
-
-private struct ControlledPrimaryPromptIdentity {
-    let livePromptTokenIDs: [Int]
-    let imprintSuffixTokenIDs: [Int]
-    let effectivePromptTokenIDsSHA256: String
-}
-
-private struct ControlledGeneration {
-    let answer: String
-    let toolCalls: [String]
-    let toolTrace: [DomainABToolTrace]
-    let elapsedMs: Int
-    let firstChunkMs: Int?
-    let metrics: InferenceMetrics?
-    let timedOut: Bool
-    let errors: [String]
-}
-
 private struct DomainABPromptResult: Encodable {
     let kind: String
     let prompt: String
@@ -1830,7 +1186,6 @@ private struct DomainABPromptResult: Encodable {
     var toolCallsBase: [String]
     var toolCallsImprint: [String]
     var toolTrace: [DomainABToolTrace]
-    var controlledArms: [DomainABControlledArmResult]
     var deltaSummary: String
     var elapsedBaseMs: Int
     var elapsedImprintMs: Int
@@ -1843,59 +1198,6 @@ private struct DomainABPromptResult: Encodable {
     var baseTimedOut: Bool
     var imprintTimedOut: Bool
     var errors: [String]
-}
-
-private struct DomainABControlledArmResult: Encodable {
-    let arm: String
-    let repeatIndex: Int
-    let executionSequence: Int
-    let profileInContext: Bool
-    let prefixDelivery: String
-    let toolsInContext: Bool
-    let answer: String
-    let neuralImprintActive: Bool
-    let restoredPrefixTokens: Int?
-    let effectivePromptTokens: Int
-    let profileBodySHA256: String?
-    let actualPromptTokenIDsSHA256: String?
-    let expectedPromptTokenIDsSHA256: String
-    let effectivePromptTokenIDsSHA256: String
-    let artifactPrefixTokenIDsSHA256: String?
-    let artifactPrefixTokenHashMatched: Bool?
-    let promptTokenHashMatched: Bool
-    let primaryPromptTokenEquivalent: Bool?
-    let systemPromptSHA256: String?
-    let toolSchemaSHA256: String?
-    let toolCalls: [String]
-    let toolTrace: [DomainABToolTrace]
-    let elapsedMs: Int
-    let firstChunkMs: Int?
-    let ttftMs: Double?
-    let decodeTPS: Double?
-    let promptTokenCount: Int?
-    let prefillTokenCount: Int?
-    let prefillMs: Double?
-    let prefillMode: String?
-    let generatedTokens: Int?
-    let promptCacheHit: Bool?
-    let cachedTokensReused: Int?
-    let thermalState: String?
-    let memoryBeforeMB: Int?
-    let memoryAfterMB: Int?
-    let policyReasoning: String?
-    let maxTokens: Int
-    let maxRounds: Int
-    let turnTimeoutSeconds: Double
-    let livenessTimeoutSeconds: Double
-    let enableThinking: Bool
-    let preserveThinking: Bool
-    let useDSR: Bool
-    let kvBits: Int?
-    let maxKVSize: Int?
-    let prefillStepSize: Int
-    let frogJumpEnabled: Bool
-    let timedOut: Bool
-    let errors: [String]
 }
 
 private struct DomainABToolTrace: Encodable {
