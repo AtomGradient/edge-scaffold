@@ -465,9 +465,24 @@ enum ScaffoldDomainABSmokeRunner {
         let artifactPrefixTokenIDsSHA256 = sidecarPrefix?["token_ids_sha256"] as? String
         let toolSchemaSHA256 = sidecarSource?["tool_schema_sha256"] as? String
         let profileBodySHA256 = sha256Text(profileBody)
-        if artifactProfileBodySHA256 != profileBodySHA256 {
-            errors.append(
-                "controlled_v2: profile body hash mismatch artifact=\(artifactProfileBodySHA256 ?? "nil") actual=\(profileBodySHA256)"
+        guard let artifactProfileBodySHA256 else {
+            return ControlledRunResult(
+                prompts: updatedPrompts,
+                errors: ["controlled_v2: sidecar missing source.profile_body_sha256"]
+            )
+        }
+        guard artifactProfileBodySHA256 == profileBodySHA256 else {
+            return ControlledRunResult(
+                prompts: updatedPrompts,
+                errors: [
+                    "controlled_v2: profile body hash mismatch artifact=\(artifactProfileBodySHA256) actual=\(profileBodySHA256)"
+                ]
+            )
+        }
+        guard let artifactPrefixTokenIDsSHA256 else {
+            return ControlledRunResult(
+                prompts: updatedPrompts,
+                errors: ["controlled_v2: sidecar missing prefix.token_ids_sha256"]
             )
         }
 
@@ -482,13 +497,20 @@ enum ScaffoldDomainABSmokeRunner {
             )
         }
 
+        let runtime: ScaffoldNeuralImprintRuntime
+        do {
+            runtime = try aiManager.readyNeuralImprintRuntime()
+        } catch {
+            return ControlledRunResult(
+                prompts: updatedPrompts,
+                errors: errors + ["controlled_v2: runtime unavailable: \(error.localizedDescription)"]
+            )
+        }
+
         var parameters = controlledV2Parameters()
         let visibleToolsPrefix: NeuralImprintPrefixRender
         do {
-            guard let engine = aiManager.llmEngine else {
-                throw ABRunnerError.modelLoadFailed("LLM engine missing")
-            }
-            visibleToolsPrefix = try await engine.renderNeuralImprintPrefix(
+            visibleToolsPrefix = try await runtime.renderNeuralImprintPrefix(
                 profileBody: profileBody,
                 tools: toolSpecs,
                 parameters: parameters
@@ -502,15 +524,70 @@ enum ScaffoldDomainABSmokeRunner {
         let visibleToolsPrefixSHA256 = tokenIDsSHA256(visibleToolsPrefix.prefixTokenIDs)
         let prefixTokenHashMatched =
             artifactPrefixTokenIDsSHA256 == visibleToolsPrefixSHA256
-        if !prefixTokenHashMatched {
-            errors.append(
-                "controlled_v2: live/restored prefix token hash mismatch artifact=\(artifactPrefixTokenIDsSHA256 ?? "nil") live=\(visibleToolsPrefixSHA256)"
+        guard prefixTokenHashMatched else {
+            return ControlledRunResult(
+                prompts: updatedPrompts,
+                errors: [
+                    "controlled_v2: live/restored prefix token hash mismatch artifact=\(artifactPrefixTokenIDsSHA256) live=\(visibleToolsPrefixSHA256)"
+                ]
             )
         }
-        if visibleToolsPrefix.prefixTokenIDs.count
-            != aiManager.neuralImprintCacheStatus?.prefixTokenCount {
-            errors.append(
-                "controlled_v2: live/restored prefix token count mismatch live=\(visibleToolsPrefix.prefixTokenIDs.count) restored=\(aiManager.neuralImprintCacheStatus?.prefixTokenCount ?? 0)"
+        let restoredPrefixTokenCount =
+            aiManager.neuralImprintCacheStatus?.prefixTokenCount ?? 0
+        guard visibleToolsPrefix.prefixTokenIDs.count == restoredPrefixTokenCount else {
+            return ControlledRunResult(
+                prompts: updatedPrompts,
+                errors: [
+                    "controlled_v2: live/restored prefix token count mismatch live=\(visibleToolsPrefix.prefixTokenIDs.count) restored=\(restoredPrefixTokenCount)"
+                ]
+            )
+        }
+
+        var primaryPromptIdentities: [ControlledPrimaryPromptIdentity] = []
+        do {
+            for prompt in updatedPrompts {
+                let livePromptTokenIDs = try await runtime.renderPromptTokenIDs(
+                    messages: controlledMessages(
+                        arm: .visibleProfileToolsLive,
+                        prompt: prompt.prompt,
+                        profileBody: profileBody
+                    ),
+                    tools: toolSpecs,
+                    parameters: parameters
+                )
+                let imprintSuffixTokenIDs = try await runtime.renderPromptTokenIDs(
+                    messages: controlledMessages(
+                        arm: .imprint,
+                        prompt: prompt.prompt,
+                        profileBody: profileBody
+                    ),
+                    tools: nil,
+                    parameters: parameters
+                )
+                let restoredPromptTokenIDs =
+                    visibleToolsPrefix.prefixTokenIDs + imprintSuffixTokenIDs
+                guard restoredPromptTokenIDs == livePromptTokenIDs else {
+                    return ControlledRunResult(
+                        prompts: updatedPrompts,
+                        errors: [
+                            "controlled_v2: rendered primary prompt token mismatch kind=\(prompt.kind) live=\(livePromptTokenIDs.count) restored=\(restoredPromptTokenIDs.count)"
+                        ]
+                    )
+                }
+                primaryPromptIdentities.append(
+                    ControlledPrimaryPromptIdentity(
+                        livePromptTokenIDs: livePromptTokenIDs,
+                        imprintSuffixTokenIDs: imprintSuffixTokenIDs,
+                        effectivePromptTokenIDsSHA256: tokenIDsSHA256(livePromptTokenIDs)
+                    )
+                )
+            }
+        } catch {
+            return ControlledRunResult(
+                prompts: updatedPrompts,
+                errors: [
+                    "controlled_v2: primary prompt render failed: \(error.localizedDescription)"
+                ]
             )
         }
 
@@ -518,7 +595,8 @@ enum ScaffoldDomainABSmokeRunner {
         var executionSequence = 0
         for repeatIndex in 0..<controlledV2Repeats {
             for promptIndex in updatedPrompts.indices {
-                let offset = (repeatIndex + promptIndex) % arms.count
+                let offset =
+                    (repeatIndex * updatedPrompts.count + promptIndex) % arms.count
                 let orderedArms = Array(arms[offset...]) + Array(arms[..<offset])
                 for arm in orderedArms {
                     executionSequence += 1
@@ -536,6 +614,33 @@ enum ScaffoldDomainABSmokeRunner {
 
                     let session = ChatSessionController(client: aiManager)
                     parameters = controlledV2Parameters()
+                    let primaryIdentity = primaryPromptIdentities[promptIndex]
+                    let expectedPromptTokenIDs: [Int]
+                    do {
+                        switch arm {
+                        case .visibleProfileToolsLive:
+                            expectedPromptTokenIDs = primaryIdentity.livePromptTokenIDs
+                        case .imprint:
+                            expectedPromptTokenIDs = primaryIdentity.imprintSuffixTokenIDs
+                        default:
+                            expectedPromptTokenIDs = try await runtime.renderPromptTokenIDs(
+                                messages: controlledMessages(
+                                    arm: arm,
+                                    prompt: updatedPrompts[promptIndex].prompt,
+                                    profileBody: profileBody
+                                ),
+                                tools: arm.toolsInContext ? toolSpecs : nil,
+                                parameters: parameters
+                            )
+                        }
+                    } catch {
+                        return ControlledRunResult(
+                            prompts: updatedPrompts,
+                            errors: errors + [
+                                "controlled_v2: expected prompt render failed arm=\(arm.rawValue) kind=\(updatedPrompts[promptIndex].kind): \(error.localizedDescription)"
+                            ]
+                        )
+                    }
                     let generation = await generateControlledAnswer(
                         arm: arm,
                         prompt: updatedPrompts[promptIndex].prompt,
@@ -546,27 +651,35 @@ enum ScaffoldDomainABSmokeRunner {
                         aiManager: aiManager,
                         session: session
                     )
-                    let livePrefixSHA256: String?
-                    if arm == .imprint {
-                        livePrefixSHA256 = visibleToolsPrefixSHA256
-                    } else {
-                        let systemPrompt = arm.profileInContext
-                            ? profileBody
-                            : ScaffoldConfig.defaultSystemPrompt
-                        let prefixTools = arm.toolsInContext ? toolSpecs : []
-                        if let engine = aiManager.llmEngine,
-                           let render = try? await engine.renderNeuralImprintPrefix(
-                            profileBody: systemPrompt,
-                            tools: prefixTools,
-                            parameters: parameters
-                           ) {
-                            livePrefixSHA256 = tokenIDsSHA256(render.prefixTokenIDs)
-                        } else {
-                            livePrefixSHA256 = nil
-                        }
-                    }
                     let metrics = generation.metrics
-                    let armErrors = generation.errors
+                    let expectedPromptTokenIDsSHA256 =
+                        tokenIDsSHA256(expectedPromptTokenIDs)
+                    let actualPromptTokenIDsSHA256 =
+                        metrics?.promptTokenIDsSHA256
+                    let promptTokenHashMatched =
+                        actualPromptTokenIDsSHA256 == expectedPromptTokenIDsSHA256
+                        && metrics?.promptTokenCount == expectedPromptTokenIDs.count
+                    let effectivePromptTokens = arm == .imprint
+                        ? restoredPrefixTokenCount + expectedPromptTokenIDs.count
+                        : expectedPromptTokenIDs.count
+                    let effectivePromptTokenIDsSHA256 = arm == .imprint
+                        ? tokenIDsSHA256(
+                            visibleToolsPrefix.prefixTokenIDs + expectedPromptTokenIDs
+                        )
+                        : expectedPromptTokenIDsSHA256
+                    let primaryPromptTokenEquivalent: Bool? =
+                        arm == .visibleProfileToolsLive || arm == .imprint
+                        ? promptTokenHashMatched
+                            && prefixTokenHashMatched
+                            && effectivePromptTokenIDsSHA256
+                                == primaryIdentity.effectivePromptTokenIDsSHA256
+                        : nil
+                    var armErrors = generation.errors
+                    let promptMismatchError = promptTokenHashMatched ? nil
+                        : "controlled_v2: actual prompt token mismatch arm=\(arm.rawValue) kind=\(updatedPrompts[promptIndex].kind) repeat=\(repeatIndex) expected_count=\(expectedPromptTokenIDs.count) actual_count=\(metrics?.promptTokenCount ?? -1)"
+                    if let promptMismatchError {
+                        armErrors.append(promptMismatchError)
+                    }
                     updatedPrompts[promptIndex].controlledArms.append(
                         DomainABControlledArmResult(
                             arm: arm.rawValue,
@@ -577,13 +690,21 @@ enum ScaffoldDomainABSmokeRunner {
                             toolsInContext: arm.toolsInContext,
                             answer: generation.answer,
                             neuralImprintActive: aiManager.hasNeuralImprintCache,
-                            prefixTokens: aiManager.neuralImprintCacheStatus?.prefixTokenCount ?? 0,
+                            restoredPrefixTokens: arm == .imprint
+                                ? restoredPrefixTokenCount
+                                : nil,
+                            effectivePromptTokens: effectivePromptTokens,
                             profileBodySHA256: arm.profileInContext ? profileBodySHA256 : nil,
-                            prefixTokenIDsSHA256: livePrefixSHA256,
+                            actualPromptTokenIDsSHA256: actualPromptTokenIDsSHA256,
+                            expectedPromptTokenIDsSHA256: expectedPromptTokenIDsSHA256,
+                            effectivePromptTokenIDsSHA256: effectivePromptTokenIDsSHA256,
                             artifactPrefixTokenIDsSHA256: artifactPrefixTokenIDsSHA256,
-                            prefixTokenHashMatched: arm == .visibleProfileToolsLive || arm == .imprint
+                            artifactPrefixTokenHashMatched:
+                                arm == .visibleProfileToolsLive || arm == .imprint
                                 ? prefixTokenHashMatched
                                 : nil,
+                            promptTokenHashMatched: promptTokenHashMatched,
+                            primaryPromptTokenEquivalent: primaryPromptTokenEquivalent,
                             systemPromptSHA256: sha256Text(
                                 arm.profileInContext
                                     ? profileBody
@@ -622,6 +743,12 @@ enum ScaffoldDomainABSmokeRunner {
                             errors: armErrors
                         )
                     )
+                    if let promptMismatchError {
+                        return ControlledRunResult(
+                            prompts: updatedPrompts,
+                            errors: errors + [promptMismatchError]
+                        )
+                    }
                 }
             }
         }
@@ -644,6 +771,24 @@ enum ScaffoldDomainABSmokeRunner {
         return parameters
     }
 
+    private static func controlledMessages(
+        arm: ControlledArm,
+        prompt: String,
+        profileBody: String
+    ) -> [ChatMessage] {
+        if arm == .imprint {
+            return [.user(prompt)]
+        }
+        return [
+            .system(
+                arm.profileInContext
+                    ? profileBody
+                    : ScaffoldConfig.defaultSystemPrompt
+            ),
+            .user(prompt),
+        ]
+    }
+
     private static func generateControlledAnswer(
         arm: ControlledArm,
         prompt: String,
@@ -659,18 +804,12 @@ enum ScaffoldDomainABSmokeRunner {
         var toolCalls: [String] = []
         var toolTrace: [DomainABToolTrace] = []
         var pendingToolArguments: [String: [String]] = [:]
-        let messages: [ChatMessage] = if arm == .imprint {
-            [.user(prompt)]
-        } else {
-            [
-                .system(
-                    arm.profileInContext
-                        ? profileBody
-                        : ScaffoldConfig.defaultSystemPrompt
-                ),
-                .user(prompt),
-            ]
-        }
+        var firstRoundMetrics: InferenceMetrics?
+        let messages = controlledMessages(
+            arm: arm,
+            prompt: prompt,
+            profileBody: profileBody
+        )
 
         do {
             try await ensureModelLoaded(aiManager)
@@ -735,6 +874,11 @@ enum ScaffoldDomainABSmokeRunner {
                                 ),
                                 resultPrefix: String(result.result.prefix(300))
                             ))
+                        },
+                        onRoundMetrics: { roundIndex, metrics in
+                            if roundIndex == 0 {
+                                firstRoundMetrics = metrics
+                            }
                         }
                     )
                 ) { chunk in
@@ -761,7 +905,7 @@ enum ScaffoldDomainABSmokeRunner {
                 toolTrace: toolTrace,
                 elapsedMs: Int(Date().timeIntervalSince(startedAt) * 1_000),
                 firstChunkMs: firstChunkMs,
-                metrics: session.lastMetrics,
+                metrics: firstRoundMetrics ?? session.lastMetrics,
                 timedOut: false,
                 errors: []
             )
@@ -772,7 +916,7 @@ enum ScaffoldDomainABSmokeRunner {
                 toolTrace: toolTrace,
                 elapsedMs: Int(Date().timeIntervalSince(startedAt) * 1_000),
                 firstChunkMs: firstChunkMs,
-                metrics: session.lastMetrics,
+                metrics: firstRoundMetrics ?? session.lastMetrics,
                 timedOut: isTimeout(error),
                 errors: [error.localizedDescription]
             )
@@ -810,8 +954,11 @@ enum ScaffoldDomainABSmokeRunner {
                                 || $0.neuralImprintActive)
                             && ($0.arm == ControlledArm.imprint.rawValue
                                 || !$0.neuralImprintActive)
+                            && $0.promptTokenHashMatched
                             && ($0.arm != ControlledArm.visibleProfileToolsLive.rawValue
-                                || $0.prefixTokenHashMatched == true)
+                                || $0.primaryPromptTokenEquivalent == true)
+                            && ($0.arm != ControlledArm.imprint.rawValue
+                                || $0.primaryPromptTokenEquivalent == true)
                     }
             }
         } else {
@@ -1653,6 +1800,12 @@ private struct ControlledRunResult {
     let errors: [String]
 }
 
+private struct ControlledPrimaryPromptIdentity {
+    let livePromptTokenIDs: [Int]
+    let imprintSuffixTokenIDs: [Int]
+    let effectivePromptTokenIDsSHA256: String
+}
+
 private struct ControlledGeneration {
     let answer: String
     let toolCalls: [String]
@@ -1701,11 +1854,16 @@ private struct DomainABControlledArmResult: Encodable {
     let toolsInContext: Bool
     let answer: String
     let neuralImprintActive: Bool
-    let prefixTokens: Int
+    let restoredPrefixTokens: Int?
+    let effectivePromptTokens: Int
     let profileBodySHA256: String?
-    let prefixTokenIDsSHA256: String?
+    let actualPromptTokenIDsSHA256: String?
+    let expectedPromptTokenIDsSHA256: String
+    let effectivePromptTokenIDsSHA256: String
     let artifactPrefixTokenIDsSHA256: String?
-    let prefixTokenHashMatched: Bool?
+    let artifactPrefixTokenHashMatched: Bool?
+    let promptTokenHashMatched: Bool
+    let primaryPromptTokenEquivalent: Bool?
     let systemPromptSHA256: String?
     let toolSchemaSHA256: String?
     let toolCalls: [String]

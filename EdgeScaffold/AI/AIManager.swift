@@ -96,6 +96,27 @@ enum ScaffoldNeuralImprintRuntime {
         }
     }
 
+    func renderPromptTokenIDs(
+        messages: [ChatMessage],
+        tools: [ToolSpec]?,
+        parameters: EdgeGenerateParameters
+    ) async throws -> [Int] {
+        switch self {
+        case .llm(let engine):
+            return try await engine.renderPromptTokenIDs(
+                messages: messages,
+                tools: tools,
+                parameters: parameters
+            )
+        case .vlm(let engine):
+            return try await engine.renderPromptTokenIDs(
+                messages: messages,
+                tools: tools,
+                parameters: parameters
+            )
+        }
+    }
+
     func captureNeuralImprintArtifact(
         request: NeuralImprintArtifactCaptureRequest
     ) async throws -> NeuralImprintRuntimeCacheStatus {
