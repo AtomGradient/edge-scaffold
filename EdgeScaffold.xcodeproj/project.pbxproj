@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 54;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -360,13 +360,6 @@
 			path = App;
 			sourceTree = "<group>";
 		};
-		388A19D7C4F239D30A0C4F5A /* Utils */ = {
-			isa = PBXGroup;
-			children = (
-			);
-			path = Utils;
-			sourceTree = "<group>";
-		};
 		68AE717F74B3F6680D0A4659 /* SampleData */ = {
 			isa = PBXGroup;
 			children = (
@@ -514,7 +507,6 @@
 				F28382EFCFDBA093FB2013BE /* Onboarding */,
 				9051C382A1D67EA3B9BA763E /* Settings */,
 				12E6010E42421A1026D9404F /* Sustainability */,
-				388A19D7C4F239D30A0C4F5A /* Utils */,
 				2654F2AEACD030829BE03E6F /* EdgeScaffold.entitlements */,
 				961A7227A6C19EEACAAACC8E /* Info.plist */,
 				40E6FB70DD0D76917A7F7FB7 /* PrivacyInfo.xcprivacy */,
@@ -583,6 +575,7 @@
 				};
 			};
 			buildConfigurationList = E96596B81ED16F0A7C60E78F /* Build configuration list for PBXProject "EdgeScaffold" */;
+			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -590,15 +583,12 @@
 				en,
 			);
 			mainGroup = C72F19AB026FEFDD68567188;
-			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				2197D5A38B7DB097003DE604 /* XCRemoteSwiftPackageReference "edge-halo-binary" */,
 				A32E6F3C89AF05BBC2164525 /* XCRemoteSwiftPackageReference "edge-kit" */,
 				27EA5AA7ED591FB11AFDCCCC /* XCRemoteSwiftPackageReference "swift-async-algorithms" */,
 				539DE0F52826F104BD7B8700 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */,
 			);
-			preferredProjectObjectVersion = 77;
-			productRefGroup = D9E8C23BB17411FF31021C6D /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
