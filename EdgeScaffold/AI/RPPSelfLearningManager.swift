@@ -387,6 +387,7 @@ final class RPPSelfLearningManager: ObservableObject {
         }
         let dict: [String: Any] = [
             "rpp_run_id": output.rppRunID,
+            "postprocessing_contract_version": output.postprocessingContractVersion,
             "n_transactions": output.nTransactions,
             "dataset_summary": datasetSummaryDict(output.datasetSummary),
             "target_layer": output.targetLayer,
