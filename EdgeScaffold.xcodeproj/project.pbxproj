@@ -845,7 +845,7 @@
 			repositoryURL = "https://github.com/AtomGradient/edge-halo-binary";
 			requirement = {
 				kind = exactVersion;
-				version = "1.0.0-rc25";
+				version = "1.0.0-rc26";
 			};
 		};
 		27EA5AA7ED591FB11AFDCCCC /* XCRemoteSwiftPackageReference "swift-async-algorithms" */ = {

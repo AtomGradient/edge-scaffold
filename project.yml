@@ -16,7 +16,7 @@ packages:
     exactVersion: 1.0.0-rc103
   EdgeHalo:
     url: https://github.com/AtomGradient/edge-halo-binary
-    exactVersion: 1.0.0-rc25
+    exactVersion: 1.0.0-rc26
   swift-async-algorithms:
     url: https://github.com/apple/swift-async-algorithms.git
     from: 1.1.3
