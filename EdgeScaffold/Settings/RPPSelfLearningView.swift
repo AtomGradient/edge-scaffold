@@ -216,7 +216,10 @@ struct RPPSelfLearningView: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(output.directions, id: \.directionKey) { d in
-                            DirectionCardView(direction: d)
+                            DirectionCardView(
+                                direction: d,
+                                fallbackNames: output.profileContext.wording.fallbackDirectionNames
+                            )
                         }
                     }
                 }
@@ -246,7 +249,7 @@ struct RPPSelfLearningView: View {
                     HStack {
                         Text("Records Processed")
                         Spacer()
-                        Text("\(output.nTransactions)")
+                        Text("\(output.recordCount)")
                             .monospacedDigit().foregroundStyle(.secondary)
                     }
                     HStack {
@@ -535,14 +538,15 @@ private struct StageSegment: View {
 
 
 private struct DirectionCardView: View {
-    let direction: RPPDirectionResult
+    let direction: RPPDirectionProfile
+    let fallbackNames: [String: String]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(direction.llmName.isEmpty
-                        ? RPPVocabulary.builtinDisplayNames[direction.directionKey]
+                        ? fallbackNames[direction.directionKey]
                             ?? direction.directionKey
                         : direction.llmName)
                         .font(.headline)
@@ -575,7 +579,7 @@ private struct DirectionCardView: View {
                         .font(.caption2.bold())
                     ForEach(0 ..< direction.topPositive.count, id: \.self) { i in
                         let pair = direction.topPositive[i]
-                        Text(formatTopTxn(rank: i + 1, txn: pair.0, proj: pair.1))
+                        Text(formatTopTxn(rank: i + 1, record: pair.record, proj: pair.projection))
                             .font(.caption2.monospaced())
                             .foregroundStyle(.green)
                     }
@@ -584,7 +588,7 @@ private struct DirectionCardView: View {
                         .font(.caption2.bold())
                     ForEach(0 ..< direction.topNegative.count, id: \.self) { i in
                         let pair = direction.topNegative[i]
-                        Text(formatTopTxn(rank: i + 1, txn: pair.0, proj: pair.1))
+                        Text(formatTopTxn(rank: i + 1, record: pair.record, proj: pair.projection))
                             .font(.caption2.monospaced())
                             .foregroundStyle(.orange)
                     }
@@ -596,28 +600,33 @@ private struct DirectionCardView: View {
     }
 
     private func formatTopTxn(
-        rank: Int, txn: RPPRawTransaction, proj: Float
+        rank: Int, record: RPPRecord, proj: Float
     ) -> String {
-        let loc = txn.location.isEmpty ? "(unknown)"
-            : String(txn.location.prefix(20))
-        return String(format: "  %d. [%+.2f] %@ %@ %@ %.0f",
-            rank, proj, txn.weekday, txn.timeStr, loc, txn.amount)
+        var parts = [String(format: "  %d. [%+.2f]", rank, proj)]
+        let when = record.context.filter { !$0.isEmpty }.joined(separator: " ")
+        if !when.isEmpty { parts.append(when) }
+        if let group = record.group { parts.append(group) }
+        if let source = record.source {
+            parts.append(source.isEmpty ? "(unknown)" : String(source.prefix(20)))
+        }
+        if let value = record.value { parts.append(String(format: "%.0f", value)) }
+        return parts.joined(separator: " ")
     }
 }
 
 
 private struct ScatterChartView: View {
-    let points: [RPPOutput.ScatterPoint]
+    let points: [RPPProjectedPoint]
     let xKey: String
     let yKey: String
 
-    private var topKExtremals: [(label: String, point: RPPOutput.ScatterPoint)] {
+    private var topKExtremals: [(label: String, point: RPPProjectedPoint)] {
         guard !points.isEmpty else { return [] }
         let topPosX = points.max(by: { $0.x < $1.x })
         let topNegX = points.min(by: { $0.x < $1.x })
         let topPosY = points.max(by: { $0.y < $1.y })
         let topNegY = points.min(by: { $0.y < $1.y })
-        var result: [(String, RPPOutput.ScatterPoint)] = []
+        var result: [(String, RPPProjectedPoint)] = []
         if let p = topPosX { result.append(("\(xKey)+", p)) }
         if let p = topNegX { result.append(("\(xKey)-", p)) }
         if let p = topPosY { result.append(("\(yKey)+", p)) }
@@ -627,12 +636,12 @@ private struct ScatterChartView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Chart(points, id: \.txnIdx) { pt in
+            Chart(points, id: \.recordIdx) { pt in
                 PointMark(
                     x: .value(xKey, pt.x),
                     y: .value(yKey, pt.y)
                 )
-                .foregroundStyle(by: .value("Category", pt.category))
+                .foregroundStyle(by: .value("Category", pt.group ?? ""))
                 .symbolSize(20)
                 .opacity(0.65)
             }
@@ -655,10 +664,10 @@ private struct ScatterChartView: View {
                                     .foregroundStyle(.indigo)
                                     .frame(width: 38, alignment: .leading)
                                 VStack(alignment: .leading, spacing: 1) {
-                                    Text(item.point.category)
+                                    Text(item.point.group ?? "")
                                         .font(.caption2)
-                                    Text(String(format: "amount %.1f · proj (%.2f, %.2f)",
-                                                 item.point.amount,
+                                    Text(String(format: "value %@ · proj (%.2f, %.2f)",
+                                                 item.point.value.map { String(format: "%.1f", $0) } ?? "—",
                                                  item.point.x,
                                                  item.point.y))
                                         .font(.caption2.monospaced())

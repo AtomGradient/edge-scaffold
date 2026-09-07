@@ -912,22 +912,25 @@ final class AIManager: ObservableObject {
 
     func runRPPProfileAnalysis(
         sentences: [String],
-        rawTransactions: [HaloRPPRawTransaction],
+        records: [HaloRPPRecord],
+        schema: HaloRPPRecordSchema,
         directionsAURL: URL,
         aLibraryManifestURL: URL,
         targetLayer: Int = 23,
         directionSetID: String = "directions_a",
         nComponents: Int = 5,
         topK: Int = 5,
-        profileContext: HaloRPPProfileContext = .finance,
+        profileContext: HaloRPPProfileContext,
+        sampleWeighting: HaloRPPSampleWeighting,
         progress: @escaping @Sendable (HaloRPPProgress) -> Void
-    ) async throws -> HaloRPPOutput {
+    ) async throws -> HaloRPPProfileResult {
         let modelID = loadedModelName
             ?? lastLoadedDirectory?.lastPathComponent
             ?? ScaffoldConfig.modelID
         return try await edgeHalo.runProfileAnalysis(
             sentences: sentences,
-            rawTransactions: rawTransactions,
+            records: records,
+            schema: schema,
             directionsAURL: directionsAURL,
             aLibraryManifestURL: aLibraryManifestURL,
             aLibraryRequirements: RPPALibraryRuntimeRequirements(
@@ -942,6 +945,7 @@ final class AIManager: ObservableObject {
             topK: topK,
             modelID: modelID,
             profileContext: profileContext,
+            sampleWeighting: sampleWeighting,
             progress: progress
         )
     }

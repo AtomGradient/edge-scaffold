@@ -45,7 +45,7 @@ final class RPPSelfLearningManager: ObservableObject {
     @Published private(set) var progressFraction: Double = 0
     @Published private(set) var elapsedSeconds: Double = 0
     @Published private(set) var isRunning = false
-    @Published private(set) var lastOutput: RPPOutput?
+    @Published private(set) var lastOutput: RPPProfileResult?
     @Published private(set) var lastError: String?
     @Published private(set) var datasetSize: Int = 0
 
@@ -176,23 +176,28 @@ final class RPPSelfLearningManager: ObservableObject {
         self.stage = .templating
         self.stageDetail = "加载数据"
         self.progressFraction = 0.01
-        let (sentences, rawTransactions) = RPPDemoData.loadData()
+        let dataset = RPPDemoData.loadData()
+        let sentences = dataset.sentences
         guard !sentences.isEmpty else {
             throw RPPSelfLearningError.datasetEmpty
         }
         self.datasetSize = sentences.count
         self.stageDetail = "已加载 \(sentences.count) 条数据"
-        let profileContext = Self.profileContext(for: ScaffoldSampleDomainRegistry.selectedDomain)
 
+        // The selected sample domain declares its own input contract: record
+        // roles, wording and weighting come from ScaffoldRPPContracts, never
+        // from an SDK default.
         let n = sentences.count
         let output = try await aiManager.runRPPProfileAnalysis(
             sentences: sentences,
-            rawTransactions: rawTransactions,
+            records: dataset.records,
+            schema: dataset.contract.schema,
             directionsAURL: aURL,
             aLibraryManifestURL: manifestURL,
             targetLayer: selectedLibrary.targetLayer,
             directionSetID: selectedLibrary.directionSetID,
-            profileContext: profileContext,
+            profileContext: dataset.contract.profileContext,
+            sampleWeighting: dataset.contract.sampleWeighting(for: dataset.records),
             progress: { [weak self] (p: RPPProgress) in
                 Task { @MainActor [weak self] in
                     guard let self = self else { return }
@@ -332,7 +337,7 @@ final class RPPSelfLearningManager: ObservableObject {
 
 
     private func dumpResultJSON(
-        _ output: RPPOutput,
+        _ output: RPPProfileResult,
         selectedLibrary: RPPALibraryManifest.Library,
         manifestURL: URL,
         usedFallback: Bool
@@ -355,7 +360,7 @@ final class RPPSelfLearningManager: ObservableObject {
     }
 
     private static func encode(
-        output: RPPOutput,
+        output: RPPProfileResult,
         selectedLibrary: RPPALibraryManifest.Library,
         manifestURL: URL,
         usedFallback: Bool
@@ -371,24 +376,33 @@ final class RPPSelfLearningManager: ObservableObject {
                 "direction_key": d.directionKey,
                 "llm_name": d.llmName,
                 "llm_reason": d.llmReason,
-                "top_positive": d.topPositive.map { p -> [String: Any] in
-                    ["category": p.transaction.category,
-                     "location": p.transaction.location,
-                     "amount": p.transaction.amount,
-                     "projection": Double(p.projection)]
-                },
-                "top_negative": d.topNegative.map { p -> [String: Any] in
-                    ["category": p.transaction.category,
-                     "location": p.transaction.location,
-                     "amount": p.transaction.amount,
-                     "projection": Double(p.projection)]
-                },
+                "top_positive": d.topPositive.map(encodeExemplar),
+                "top_negative": d.topNegative.map(encodeExemplar),
             ])
+        }
+        var sampleWeighting: [String: Any] = [
+            "kind": output.sampleWeighting.kind.rawValue,
+            "formula_id": output.sampleWeighting.formulaID,
+            "formula_version": output.sampleWeighting.formulaVersion,
+            "count": output.sampleWeighting.count,
+        ]
+        if let sourceField = output.sampleWeighting.sourceField {
+            sampleWeighting["source_field"] = sourceField
+        }
+        if let valuesSHA256 = output.sampleWeighting.valuesSHA256 {
+            sampleWeighting["values_sha256"] = valuesSHA256
         }
         let dict: [String: Any] = [
             "rpp_run_id": output.rppRunID,
-            "n_transactions": output.nTransactions,
-            "dataset_summary": datasetSummaryDict(output.datasetSummary),
+            "postprocessing_contract_version": output.postprocessingContractVersion,
+            "rpp_input_fingerprint_sha256": output.inputFingerprintSHA256,
+            "input_schema_id": output.schema.schemaID,
+            "input_schema_fields": output.schema.declaredFieldNames,
+            "profile_context_id": output.profileContext.domainID,
+            "sample_weighting": sampleWeighting,
+            "n_transactions": output.recordCount,
+            "n_records": output.recordCount,
+            "dataset_summary": datasetSummaryDict(output.valueSummary),
             "target_layer": output.targetLayer,
             "a_library_id": selectedLibrary.libraryID,
             "a_library_kind": selectedLibrary.libraryKind,
@@ -471,7 +485,7 @@ final class RPPSelfLearningManager: ObservableObject {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private func dumpDirectionsB(_ output: RPPOutput) {
+    private func dumpDirectionsB(_ output: RPPProfileResult) {
         guard output.directionsB.rows > 0,
               output.directionsB.rows == output.directionsBKeys.count else {
             return
@@ -494,34 +508,36 @@ final class RPPSelfLearningManager: ObservableObject {
         }
     }
 
-    private static func neuralImprintProfileBody(output: RPPOutput) -> String {
-        let summary = output.datasetSummary
+    private static func neuralImprintProfileBody(output: RPPProfileResult) -> String {
+        let summary = output.valueSummary
+        let valueNoun = output.profileContext.valueNoun
         var sections: [String] = []
-        sections.append(
-            """
+        var header = """
             RPP run \(output.rppRunID)
-            数据范围：\(output.nTransactions) 条已分类 scaffold sample facts，target_layer=\(output.targetLayer)，k_selected=\(output.kSelected)
-            金额摘要：total=\(formatAmount(summary.totalAmount))，average=\(formatAmount(summary.averageAmount))，median=\(formatAmount(summary.medianAmount))，max=\(formatAmount(summary.maxAmount))
+            数据范围：\(output.recordCount) 条已分类 scaffold sample facts（\(output.schema.schemaID)），target_layer=\(output.targetLayer)，k_selected=\(output.kSelected)
             """
-        )
+        if summary.valuedCount > 0 {
+            header += "\n\(valueNoun)摘要（有值 \(summary.valuedCount)/\(summary.totalCount)）：total=\(formatAmount(summary.totalValue))，average=\(formatAmount(summary.averageValue))，median=\(formatAmount(summary.medianValue))，max=\(formatAmount(summary.maxValue))"
+        }
+        sections.append(header)
 
         let topCategoriesByCount = bucketLine(
             title: "按次数最高的类别",
-            buckets: summary.topCategoriesByCount
+            buckets: summary.topGroupsByCount
         )
         if !topCategoriesByCount.isEmpty {
             sections.append(topCategoriesByCount)
         }
         let topCategoriesByAmount = bucketLine(
-            title: "按金额最高的类别",
-            buckets: summary.topCategoriesByAmount
+            title: "按\(valueNoun)最高的类别",
+            buckets: summary.topGroupsByValue
         )
         if !topCategoriesByAmount.isEmpty {
             sections.append(topCategoriesByAmount)
         }
         let topWeekdaysByCount = bucketLine(
             title: "按次数最高的星期",
-            buckets: summary.topWeekdaysByCount
+            buckets: summary.topContextByCount
         )
         if !topWeekdaysByCount.isEmpty {
             sections.append(topWeekdaysByCount)
@@ -554,23 +570,13 @@ final class RPPSelfLearningManager: ObservableObject {
         return sections.joined(separator: "\n\n")
     }
 
-    private static func profileContext(for domain: ScaffoldSampleDomainDescriptor) -> RPPProfileContext {
-        guard domain.id != .finance else { return .finance }
-        return RPPProfileContext(
-            domainID: domain.id.rawValue,
-            domainDisplayName: domain.displayName,
-            recordNoun: "记录",
-            valueNoun: "记录值",
-            analystRole: "熟悉该领域的个人分析助手"
-        )
-    }
-
     private static func bucketLine(
         title: String,
-        buckets: [RPPDatasetSummary.Bucket]
+        buckets: [RPPValueSummary.Bucket]
     ) -> String {
-        let entries = buckets.prefix(8).map { bucket in
-            "\(bucket.key)(count=\(bucket.count), total=\(formatAmount(bucket.totalAmount)), avg=\(formatAmount(bucket.averageAmount)))"
+        let entries = buckets.prefix(8).map { bucket -> String in
+            guard bucket.valuedCount > 0 else { return "\(bucket.key)(count=\(bucket.count))" }
+            return "\(bucket.key)(count=\(bucket.count), valued=\(bucket.valuedCount), total=\(formatAmount(bucket.totalValue)), avg=\(formatAmount(bucket.averageValue)))"
         }
         guard !entries.isEmpty else { return "" }
         return "\(title)：\(entries.joined(separator: "；"))"
@@ -580,24 +586,43 @@ final class RPPSelfLearningManager: ObservableObject {
         String(format: "%.2f", value)
     }
 
-    private static func datasetSummaryDict(_ summary: RPPDatasetSummary) -> [String: Any] {
-        func bucket(_ value: RPPDatasetSummary.Bucket) -> [String: Any] {
+    private static func encodeExemplar(_ p: RPPProjectedRecord) -> [String: Any] {
+        var dict: [String: Any] = [
+            "context": p.record.context,
+            "category": p.record.group ?? "",
+            "location": p.record.source ?? "",
+            "projection": Double(p.projection),
+        ]
+        if let group = p.record.group { dict["group"] = group }
+        if let source = p.record.source { dict["source"] = source }
+        if let value = p.record.value {
+            dict["value"] = value
+            dict["amount"] = value
+        }
+        return dict
+    }
+
+    private static func datasetSummaryDict(_ summary: RPPValueSummary) -> [String: Any] {
+        func bucket(_ value: RPPValueSummary.Bucket) -> [String: Any] {
             [
                 "key": value.key,
                 "count": value.count,
-                "total_amount": value.totalAmount,
-                "average_amount": value.averageAmount,
+                "valued_count": value.valuedCount,
+                "total_amount": value.totalValue,
+                "average_amount": value.averageValue,
             ]
         }
         return [
             "total_count": summary.totalCount,
-            "total_amount": summary.totalAmount,
-            "average_amount": summary.averageAmount,
-            "median_amount": summary.medianAmount,
-            "max_amount": summary.maxAmount,
-            "top_categories_by_count": summary.topCategoriesByCount.map(bucket),
-            "top_categories_by_amount": summary.topCategoriesByAmount.map(bucket),
-            "top_weekdays_by_count": summary.topWeekdaysByCount.map(bucket),
+            "value_field_declared": summary.valueFieldDeclared,
+            "valued_count": summary.valuedCount,
+            "total_amount": summary.totalValue,
+            "average_amount": summary.averageValue,
+            "median_amount": summary.medianValue,
+            "max_amount": summary.maxValue,
+            "top_categories_by_count": summary.topGroupsByCount.map(bucket),
+            "top_categories_by_amount": summary.topGroupsByValue.map(bucket),
+            "top_weekdays_by_count": summary.topContextByCount.map(bucket),
         ]
     }
 
