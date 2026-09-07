@@ -138,18 +138,39 @@ enum RPPDemoData {
         let contract: ScaffoldRPPDomainContract
     }
 
-    static func loadData() -> Dataset {
+    enum LoadError: LocalizedError {
+        case queryFailed(domain: String, underlying: Error)
+
+        var errorDescription: String? {
+            switch self {
+            case .queryFailed(let domain, let underlying):
+                return "RPPDemoData: Edge.queryFacts failed for domain \(domain) — \(underlying.localizedDescription)"
+            }
+        }
+    }
+
+    /// Dataset of the selected domain on that domain's own contract.
+    ///
+    /// The data, the contract and the A library selected by the caller must
+    /// all belong to the same domain: a domain without facts yields an empty
+    /// dataset on its own contract (the caller stops with datasetEmpty), and
+    /// a failed query is an error. Only the finance domain has a built-in
+    /// consumption demo, and only when its query succeeded with no facts.
+    static func loadData() throws -> Dataset {
         let domain = ScaffoldSampleDomainRegistry.selectedDomain
-        if let loaded = selectedDomainRecords(), !loaded.records.isEmpty {
+        let loaded = try selectedDomainRecords()
+        if !loaded.records.isEmpty {
             let sentences = loaded.records.map {
                 activitySentence(for: $0, domain: domain, contract: loaded.contract)
             }
             return Dataset(sentences: sentences, records: loaded.records, contract: loaded.contract)
         }
-        let contract = ScaffoldRPPContracts.contract(for: ScaffoldSampleDomainRegistry.descriptor(forRawValue: ScaffoldSampleDomainID.finance.rawValue))
+        guard domain.id == .finance else {
+            return Dataset(sentences: [], records: [], contract: loaded.contract)
+        }
         let records = demoRecords
-        let sentences = records.map { activitySentence(for: $0, contract: contract) }
-        return Dataset(sentences: sentences, records: records, contract: contract)
+        let sentences = records.map { activitySentence(for: $0, contract: loaded.contract) }
+        return Dataset(sentences: sentences, records: records, contract: loaded.contract)
     }
 
     /// Built-in consumption demo sentence (finance contract only).
@@ -184,17 +205,21 @@ enum RPPDemoData {
 
     /// Records of the selected sample domain on its declared contract. A
     /// missing payload field stays missing (nil role); nothing is padded.
-    static func selectedDomainRecords(limit: Int? = 1_000)
-        -> (records: [RPPRecord], contract: ScaffoldRPPDomainContract)?
+    /// A failed query is an error, never an empty or substituted dataset.
+    static func selectedDomainRecords(limit: Int? = 1_000) throws
+        -> (records: [RPPRecord], contract: ScaffoldRPPDomainContract)
     {
         let domain = ScaffoldSampleDomainRegistry.selectedDomain
         let contract = ScaffoldRPPContracts.contract(for: domain)
-        guard let facts = try? Edge.queryFacts(
-            namespace: domain.namespace,
-            status: .classifiedOnly,
-            limit: limit
-        ) else {
-            return nil
+        let facts: [Fact]
+        do {
+            facts = try Edge.queryFacts(
+                namespace: domain.namespace,
+                status: .classifiedOnly,
+                limit: limit
+            )
+        } catch {
+            throw LoadError.queryFailed(domain: domain.id.rawValue, underlying: error)
         }
         let records = facts.map { record(from: $0.payload, contract: contract) }
         // Deterministic order: valued records by value descending, ties and
@@ -223,15 +248,18 @@ enum RPPDemoData {
         )
     }
 
+    /// A present, non-blank string; JSON null and blank strings are missing.
     private static func string(from value: Any?) -> String? {
-        switch value {
-        case let value as String where !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
-            return value
-        case let value as CustomStringConvertible:
-            return value.description
-        default:
+        guard let value, !(value is NSNull) else { return nil }
+        let text: String
+        if let string = value as? String {
+            text = string
+        } else if let convertible = value as? CustomStringConvertible {
+            text = convertible.description
+        } else {
             return nil
         }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
     }
 
     private static func double(from value: Any?) -> Double? {
@@ -354,10 +382,14 @@ enum ScaffoldPersonaRPPInputExporter {
         )
     }
 
-    static func demoSourceRecords(limit: Int = 10_000) -> [ScaffoldPersonaRPPInputSourceRecord] {
+    /// Upload records of the selected domain. Same domain rule as
+    /// `RPPDemoData.loadData`: a failed query is an error, a non-finance domain
+    /// without facts yields no records (the caller fails with noRecords), and
+    /// the consumption demo only ever stands in for the finance domain.
+    static func demoSourceRecords(limit: Int = 10_000) throws -> [ScaffoldPersonaRPPInputSourceRecord] {
         let domain = ScaffoldSampleDomainRegistry.selectedDomain
-        if let loaded = RPPDemoData.selectedDomainRecords(limit: limit),
-           !loaded.records.isEmpty {
+        let loaded = try RPPDemoData.selectedDomainRecords(limit: limit)
+        if !loaded.records.isEmpty {
             return loaded.records.enumerated().map { index, record in
                 ScaffoldPersonaRPPInputSourceRecord(
                     stableID: String(format: "scaffold.%@.%03d", domain.id.rawValue, index + 1),
@@ -367,12 +399,12 @@ enum ScaffoldPersonaRPPInputExporter {
                 )
             }
         }
-        let contract = ScaffoldRPPContracts.contract(for: ScaffoldSampleDomainRegistry.descriptor(forRawValue: ScaffoldSampleDomainID.finance.rawValue))
+        guard domain.id == .finance else { return [] }
         return Array(RPPDemoData.demoRecords.prefix(max(0, limit))).enumerated().map { index, record in
             ScaffoldPersonaRPPInputSourceRecord(
                 stableID: String(format: "scaffold.demo.%03d", index + 1),
                 kind: "demo_activity_sentence",
-                text: RPPDemoData.activitySentence(for: record, contract: contract),
+                text: RPPDemoData.activitySentence(for: record, contract: loaded.contract),
                 tags: ["scaffold", "demo", "rpp_input"]
             )
         }

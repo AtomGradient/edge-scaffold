@@ -176,7 +176,7 @@ final class RPPSelfLearningManager: ObservableObject {
         self.stage = .templating
         self.stageDetail = "加载数据"
         self.progressFraction = 0.01
-        let dataset = RPPDemoData.loadData()
+        let dataset = try RPPDemoData.loadData()
         let sentences = dataset.sentences
         guard !sentences.isEmpty else {
             throw RPPSelfLearningError.datasetEmpty
